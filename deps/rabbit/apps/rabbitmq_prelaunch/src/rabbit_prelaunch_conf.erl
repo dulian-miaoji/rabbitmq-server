@@ -134,9 +134,21 @@ maybe_configure_osiris_replication_over_tls() ->
 osiris_replication_over_tls_configuration(InitArgs) ->
     case proplists:lookup(ssl_dist_optfile, InitArgs) of
         none ->
-            % TODO extract ssl_dist_opt arguments
-            [];
+            ?LOG_DEBUG("Using ssl_dist_opt to configure stream replication over TLS",
+                #{domain => ?RMQLOG_DOMAIN_PRELAUNCH}),
+            SslDistOpt = proplists:lookup_all(ssl_dist_opt, InitArgs),
+            [
+                {osiris, [
+                    {replication_transport, ssl},
+                    {replication_server_ssl_options,
+                        build_osiris_replication_over_tls_options("server_", SslDistOpt, [])},
+                    {replication_client_ssl_options,
+                        build_osiris_replication_over_tls_options("client_", SslDistOpt, [])}
+                ]}
+            ];
         {ssl_dist_optfile, [OptFile]} ->
+            ?LOG_DEBUG("Using ssl_dist_optfile to configure stream replication over TLS",
+                #{domain => ?RMQLOG_DOMAIN_PRELAUNCH}),
             case file:consult(OptFile) of
                 {ok, [[{server, SslHandshakeOptions}, {client, SslConnectOptions}]]} ->
                     [
@@ -159,8 +171,68 @@ osiris_replication_over_tls_configuration(InitArgs) ->
             end
     end.
 
+build_osiris_replication_over_tls_options(_Prefix, [], Acc) ->
+    Acc;
+build_osiris_replication_over_tls_options(Prefix, [{ssl_dist_opt, [K, V]} | H], Acc) ->
+    % starts with prefix?
+    case string:find(K, Prefix) of
+        nomatch ->
+            build_osiris_replication_over_tls_options(Prefix, H, Acc);
+        K ->
+            Option = list_to_atom(string:slice(K, string:length(Prefix))),
+            build_osiris_replication_over_tls_options(Prefix, H,
+                Acc ++ [extract_osiris_replication_over_tls_option(Option, V)]);
+        _ ->
+            build_osiris_replication_over_tls_options(Prefix, H, Acc)
+    end;
+build_osiris_replication_over_tls_options(Prefix, [{ssl_dist_opt, [K1, V1, K2, V2]} | H], Acc) ->
+    % for -ssl_dist_opt server_secure_renegotiate true client_secure_renegotiate true
+    build_osiris_replication_over_tls_options(Prefix,
+        [{ssl_dist_opt, [K1, V1]}, {ssl_dist_opt, [K2, V2]}] ++ H, Acc).
 
+extract_osiris_replication_over_tls_option(certfile, V) ->
+    {certfile, V};
+extract_osiris_replication_over_tls_option(keyfile, V) ->
+    {keyfile, V};
+extract_osiris_replication_over_tls_option(password, V) ->
+    {password, V};
+extract_osiris_replication_over_tls_option(cacertfile, V) ->
+    {cacertfile, V};
+extract_osiris_replication_over_tls_option(verify, V) ->
+    {verify, list_to_atom(V)};
+extract_osiris_replication_over_tls_option(verify_fun, V) ->
+    % (write as {Module, Function, InitialUserState})
+    {verify_fun, eval_term(V)};
+extract_osiris_replication_over_tls_option(crl_check, V) ->
+    {crl_check, list_to_atom(V)};
+extract_osiris_replication_over_tls_option(crl_cache, V) ->
+    % (write as Erlang term)
+    {crl_cache, eval_term(V)};
+extract_osiris_replication_over_tls_option(reuse_sessions, V) ->
+    % boolean() | save
+    {reuse_sessions, eval_term(V)};
+extract_osiris_replication_over_tls_option(secure_renegotiate, V) ->
+    {secure_renegotiate, list_to_atom(V)};
+extract_osiris_replication_over_tls_option(depth, V) ->
+    {depth, list_to_integer(V)};
+extract_osiris_replication_over_tls_option(hibernate_after, "undefined") ->
+    {hibernate_after, undefined};
+extract_osiris_replication_over_tls_option(hibernate_after, V) ->
+    {hibernate_after, list_to_integer(V)};
+extract_osiris_replication_over_tls_option(ciphers, V) ->
+    % (use old string format)
+    % e.g. TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256
+    {ciphers, V};
+extract_osiris_replication_over_tls_option(fail_if_no_peer_cert, V) ->
+    {fail_if_no_peer_cert, list_to_atom(V)};
+extract_osiris_replication_over_tls_option(dhfile, V) ->
+    {dhfile, V}.
 
+eval_term(V) ->
+    {ok, Tokens, _EndLine} = erl_scan:string(V ++ "."),
+    {ok, AbsForm} = erl_parse:parse_exprs(Tokens),
+    {value, Term, _Bs} = erl_eval:exprs(AbsForm, erl_eval:new_bindings()),
+    Term.
 
 inet_tls_enabled([]) ->
     false;
